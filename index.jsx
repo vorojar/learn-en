@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Mic, MicOff, CheckCircle2, XCircle, ArrowRight, BookOpen, MessageSquare, Volume2, Send, Loader2, RotateCcw, AlertCircle, KeyRound, Save, ChevronDown, ChevronUp, Square } from 'lucide-react';
+import { Play, Pause, Mic, MicOff, CheckCircle2, XCircle, ArrowRight, BookOpen, MessageSquare, Volume2, Send, Loader2, RotateCcw, AlertCircle, KeyRound, Save, ChevronDown, ChevronUp, Square } from 'lucide-react';
 
 const DEFAULT_API_BASE = 'https://api.kie.ai/gemini-3-flash/v1/chat/completions';
 const DEFAULT_API_MODEL = 'gemini-3-flash';
@@ -53,15 +53,96 @@ const chatComplete = async ({ system, messages, jsonMode = false }) => {
   return content;
 };
 
+// --- 自制的语音气泡播放器（取代原生灰色 <audio controls>） ---
+function VoiceBubble({ url, duration }) {
+  const audioRef = useRef(null);
+  const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);
+
+  useEffect(() => {
+    const a = audioRef.current;
+    if (!a) return;
+    const onPlay = () => setPlaying(true);
+    const onPause = () => setPlaying(false);
+    const onEnd = () => { setPlaying(false); setProgress(0); };
+    const onTime = () => {
+      if (a.duration && isFinite(a.duration)) setProgress(a.currentTime / a.duration);
+    };
+    a.addEventListener('play', onPlay);
+    a.addEventListener('pause', onPause);
+    a.addEventListener('ended', onEnd);
+    a.addEventListener('timeupdate', onTime);
+    return () => {
+      a.removeEventListener('play', onPlay);
+      a.removeEventListener('pause', onPause);
+      a.removeEventListener('ended', onEnd);
+      a.removeEventListener('timeupdate', onTime);
+    };
+  }, []);
+
+  const toggle = () => {
+    const a = audioRef.current;
+    if (!a) return;
+    if (a.paused) a.play(); else a.pause();
+  };
+
+  const BAR_COUNT = 18;
+  const bars = Array.from({ length: BAR_COUNT }, (_, i) => {
+    const h = 35 + Math.abs(Math.sin(i * 0.9) * 50) + (i % 3) * 8;
+    return Math.min(100, h);
+  });
+  const progressBarIdx = progress * BAR_COUNT;
+
+  return (
+    <div className="flex items-center gap-2.5 py-0.5 min-w-[200px]">
+      <button
+        onClick={toggle}
+        className="shrink-0 w-9 h-9 rounded-full bg-white/20 hover:bg-white/30 active:scale-95 flex items-center justify-center transition-all"
+      >
+        {playing ? <Pause className="w-4 h-4" fill="currentColor" /> : <Play className="w-4 h-4 ml-0.5" fill="currentColor" />}
+      </button>
+      <div className="flex items-center gap-[3px] h-7 flex-1">
+        {bars.map((h, i) => {
+          const played = i < progressBarIdx;
+          return (
+            <span
+              key={i}
+              className={`w-[3px] rounded-full transition-colors ${played ? 'bg-white' : 'bg-white/35'}`}
+              style={{ height: `${h}%` }}
+            />
+          );
+        })}
+      </div>
+      <span className="text-xs font-mono tabular-nums opacity-90 shrink-0">{duration}s</span>
+      <audio ref={audioRef} src={url} preload="metadata" className="hidden" />
+    </div>
+  );
+}
+
+// --- 持久化学习进度（刷新保持步骤） ---
+const STATE_KEY = 'sec_learning_state';
+const loadSavedState = () => {
+  try {
+    const raw = safeGetLS(STATE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (typeof parsed !== 'object' || !parsed) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
 // --- 主应用组件 ---
 export default function App() {
-  const [step, setStep] = useState(1); // 1: Input, 2: Learn, 3: Practice, 4: Roleplay
+  const savedState = loadSavedState();
+  const [step, setStep] = useState(savedState?.step || 1); // 1: Input, 2: Learn, 3: Practice, 4: Roleplay
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
   // 核心数据状态
-  const [corpus, setCorpus] = useState("");
-  const [analysisData, setAnalysisData] = useState(null);
+  const [corpus, setCorpus] = useState(savedState?.corpus || "");
+  const [analysisData, setAnalysisData] = useState(savedState?.analysisData || null);
 
   // 练习题状态
   const [currentQuestionIdx, setCurrentQuestionIdx] = useState(0);
@@ -140,6 +221,20 @@ export default function App() {
       chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [chatHistory, step, isAiTyping]);
+
+  // 刷新后直接进入 Step 4 时，chatHistory 是空的，重建开场白
+  useEffect(() => {
+    if (step === 4 && analysisData && chatHistory.length === 0) {
+      setChatHistory([{ role: 'ai', content: analysisData.roleplay.firstMessage }]);
+    }
+  }, [step, analysisData]);
+
+  // 持久化学习进度（step / corpus / analysisData）
+  useEffect(() => {
+    try {
+      safeSetLS(STATE_KEY, JSON.stringify({ step, corpus, analysisData }));
+    } catch { /* 忽略 localStorage 失败 */ }
+  }, [step, corpus, analysisData]);
 
 
   // --- API 调用：分析语料生成学习数据 ---
@@ -797,16 +892,7 @@ export default function App() {
                       </button>
                     )}
                     {msg.audio ? (
-                      <div className="flex items-center gap-2">
-                        <Mic className="w-4 h-4 shrink-0 opacity-80" />
-                        <audio
-                          controls
-                          src={msg.audio.url}
-                          className="h-8 max-w-[220px] sm:max-w-[280px]"
-                          preload="metadata"
-                        />
-                        <span className="text-xs opacity-80 font-mono tabular-nums">{msg.audio.duration}s</span>
-                      </div>
+                      <VoiceBubble url={msg.audio.url} duration={msg.audio.duration} />
                     ) : (
                       <p className="leading-relaxed text-base">{msg.content}</p>
                     )}
@@ -869,7 +955,7 @@ export default function App() {
             </div>
 
             <div className="bg-white px-4 pb-4 pt-1 flex justify-center">
-              <button onClick={() => { setStep(1); setCorpus(""); setChatHistory([]) }} className="text-sm text-slate-400 flex items-center gap-1 hover:text-indigo-600 transition-colors py-2 px-4 rounded-full hover:bg-slate-50">
+              <button onClick={() => { setStep(1); setCorpus(""); setAnalysisData(null); setChatHistory([]); setCurrentQuestionIdx(0); setSelectedOption(null); setIsAnswerChecked(false); setScore(0); }} className="text-sm text-slate-400 flex items-center gap-1 hover:text-indigo-600 transition-colors py-2 px-4 rounded-full hover:bg-slate-50">
                 <RotateCcw className="w-4 h-4" /> 结束练习，返回首页
               </button>
             </div>
