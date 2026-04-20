@@ -145,13 +145,13 @@ export default function App() {
   const [analysisData, setAnalysisData] = useState(savedState?.analysisData || null);
 
   // 练习题状态
-  const [currentQuestionIdx, setCurrentQuestionIdx] = useState(0);
-  const [selectedOption, setSelectedOption] = useState(null);
-  const [isAnswerChecked, setIsAnswerChecked] = useState(false);
-  const [score, setScore] = useState(0);
+  const [currentQuestionIdx, setCurrentQuestionIdx] = useState(savedState?.currentQuestionIdx || 0);
+  const [selectedOption, setSelectedOption] = useState(savedState?.selectedOption ?? null);
+  const [isAnswerChecked, setIsAnswerChecked] = useState(savedState?.isAnswerChecked || false);
+  const [score, setScore] = useState(savedState?.score || 0);
 
   // 角色扮演状态
-  const [chatHistory, setChatHistory] = useState([]);
+  const [chatHistory, setChatHistory] = useState(savedState?.chatHistory || []);
   const [chatInput, setChatInput] = useState("");
   const [isAiTyping, setIsAiTyping] = useState(false);
   const chatEndRef = useRef(null);
@@ -229,12 +229,28 @@ export default function App() {
     }
   }, [step, analysisData]);
 
-  // 持久化学习进度（step / corpus / analysisData）
+  // 持久化学习进度（所有 step 的核心数据）
   useEffect(() => {
     try {
-      safeSetLS(STATE_KEY, JSON.stringify({ step, corpus, analysisData }));
+      // chatHistory 里语音消息的 blob URL 刷新后失效，persist 时剥离成"语音消息 占位"
+      const persistableChat = chatHistory.map(msg => {
+        if (msg.audio) {
+          return { role: msg.role, content: msg.content, _wasAudio: true, _audioDuration: msg.audio.duration };
+        }
+        return msg;
+      });
+      safeSetLS(STATE_KEY, JSON.stringify({
+        step,
+        corpus,
+        analysisData,
+        currentQuestionIdx,
+        selectedOption,
+        isAnswerChecked,
+        score,
+        chatHistory: persistableChat
+      }));
     } catch { /* 忽略 localStorage 失败 */ }
-  }, [step, corpus, analysisData]);
+  }, [step, corpus, analysisData, currentQuestionIdx, selectedOption, isAnswerChecked, score, chatHistory]);
 
 
   // --- API 调用：分析语料生成学习数据 ---
@@ -964,6 +980,12 @@ status 含义:
                     )}
                     {msg.audio ? (
                       <VoiceBubble url={msg.audio.url} duration={msg.audio.duration} />
+                    ) : msg._wasAudio ? (
+                      <div className="flex items-center gap-2 opacity-75">
+                        <Mic className="w-4 h-4 shrink-0" />
+                        <span className="italic text-sm">语音消息 · {msg._audioDuration}s</span>
+                        <span className="text-xs opacity-60">（刷新后无法回放）</span>
+                      </div>
                     ) : (
                       <p className="leading-relaxed text-base">{msg.content}</p>
                     )}
