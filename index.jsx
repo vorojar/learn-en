@@ -88,6 +88,22 @@ export default function App() {
   const [showKeyPanel, setShowKeyPanel] = useState(() => !safeGetLS(LS_KEYS.key));
   const [keySaved, setKeySaved] = useState(false);
 
+  // 输入即持久化（不依赖"保存"按钮），刷新后即可直接用
+  const persistKey = (v) => {
+    setApiKeyInput(v);
+    const t = v.trim();
+    if (t) safeSetLS(LS_KEYS.key, t);
+    else safeSetLS(LS_KEYS.key, '');
+  };
+  const persistBase = (v) => {
+    setApiBaseInput(v);
+    safeSetLS(LS_KEYS.base, v.trim() || DEFAULT_API_BASE);
+  };
+  const persistModel = (v) => {
+    setApiModelInput(v);
+    safeSetLS(LS_KEYS.model, v.trim() || DEFAULT_API_MODEL);
+  };
+
   const saveApiConfig = () => {
     const trimmed = apiKeyInput.trim();
     if (!trimmed) {
@@ -386,11 +402,14 @@ export default function App() {
                   <KeyRound className="w-4 h-4 text-indigo-600" />
                   API 配置
                   {apiKeyInput ? (
-                    <span className="text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded-full font-medium">已保存</span>
+                    <>
+                      <span className="text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded-full font-medium">已缓存</span>
+                      <span className="text-xs text-slate-400 font-mono">····{apiKeyInput.trim().slice(-4)}</span>
+                    </>
                   ) : (
                     <span className="text-xs px-2 py-0.5 bg-orange-100 text-orange-700 rounded-full font-medium">未配置</span>
                   )}
-                  {keySaved && <span className="text-xs text-green-600 font-medium animate-in fade-in">✓ 已保存到本机</span>}
+                  {keySaved && <span className="text-xs text-green-600 font-medium animate-in fade-in">✓ 已更新</span>}
                 </span>
                 {showKeyPanel ? <ChevronUp className="w-4 h-4 text-slate-500" /> : <ChevronDown className="w-4 h-4 text-slate-500" />}
               </button>
@@ -402,7 +421,7 @@ export default function App() {
                     <input
                       type="password"
                       value={apiKeyInput}
-                      onChange={(e) => setApiKeyInput(e.target.value)}
+                      onChange={(e) => persistKey(e.target.value)}
                       placeholder="粘贴你的 API Key，例如 kie.ai 的 key"
                       className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none"
                     />
@@ -412,7 +431,7 @@ export default function App() {
                     <input
                       type="text"
                       value={apiBaseInput}
-                      onChange={(e) => setApiBaseInput(e.target.value)}
+                      onChange={(e) => persistBase(e.target.value)}
                       placeholder={DEFAULT_API_BASE}
                       className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-mono focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none"
                     />
@@ -422,7 +441,7 @@ export default function App() {
                     <input
                       type="text"
                       value={apiModelInput}
-                      onChange={(e) => setApiModelInput(e.target.value)}
+                      onChange={(e) => persistModel(e.target.value)}
                       placeholder={DEFAULT_API_MODEL}
                       className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-mono focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none"
                     />
