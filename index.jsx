@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Mic, CheckCircle2, XCircle, ArrowRight, BookOpen, MessageSquare, Volume2, Send, Loader2, RotateCcw, AlertCircle, KeyRound, Save, ChevronDown, ChevronUp } from 'lucide-react';
+import { Play, Mic, MicOff, CheckCircle2, XCircle, ArrowRight, BookOpen, MessageSquare, Volume2, Send, Loader2, RotateCcw, AlertCircle, KeyRound, Save, ChevronDown, ChevronUp, Square } from 'lucide-react';
 
 const DEFAULT_API_BASE = 'https://api.kie.ai/gemini-3-flash/v1/chat/completions';
 const DEFAULT_API_MODEL = 'gemini-3-flash';
@@ -80,6 +80,16 @@ export default function App() {
   const [recognitionResult, setRecognitionResult] = useState("");
   const [pronunciationFeedback, setPronunciationFeedback] = useState(null);
   const [activeWordId, setActiveWordId] = useState(null);
+
+  // 语音聊天录音状态
+  const [isVoiceRecording, setIsVoiceRecording] = useState(false);
+  const [recordSec, setRecordSec] = useState(0);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const recordTimerRef = useRef(null);
+  const recordStartRef = useRef(0);
+  const audioStreamRef = useRef(null);
+  const MAX_RECORD_SEC = 60;
 
   // API 配置状态（走 localStorage）
   const [apiKeyInput, setApiKeyInput] = useState(() => safeGetLS(LS_KEYS.key));
@@ -272,31 +282,44 @@ export default function App() {
   };
 
   // --- API 调用：情景对话 (Roleplay) ---
+  const buildRoleplaySystemPrompt = () => `你正在和一个中职英语学生进行角色扮演对话。
+情景设定: ${analysisData.roleplay.scenario}
+你扮演: ${analysisData.roleplay.aiRole}
+学生扮演: ${analysisData.roleplay.studentRole}
+请保持回复简短、自然（1-3句话），使用适合初中/中职水平的基础词汇。如果学生的回复中存在明显的英语语法/发音错误，请在你的回复中自然地用正确的表达重复一次，以作示范。`;
+
+  // 把 chatHistory 转成 API 消息；历史里的 audio 降级为文本占位（节省 token 与重复编码）
+  const historyToApiMessages = (history, audioPayload) => history.map((msg, idx) => {
+    const isLast = idx === history.length - 1;
+    if (msg.role === 'ai') {
+      return { role: 'assistant', content: msg.content };
+    }
+    if (isLast && audioPayload) {
+      return {
+        role: 'user',
+        content: [
+          { type: 'text', text: '请直接用英语自然地回应这段录音（1-3 句）。如学生有明显发音或语法错误，请在你的回复中示范一次正确的表达。' },
+          { type: 'input_audio', input_audio: { data: audioPayload.base64, format: audioPayload.format } }
+        ]
+      };
+    }
+    return {
+      role: 'user',
+      content: msg.audio ? `[voice message, ${msg.audio.duration}s]` : msg.content
+    };
+  });
+
   const sendChatMessage = async (userMsg) => {
     if (!userMsg.trim()) return;
-
     const newHistory = [...chatHistory, { role: 'user', content: userMsg }];
     setChatHistory(newHistory);
     setChatInput("");
     setIsAiTyping(true);
-
     try {
-      const systemPrompt = `你正在和一个中职英语学生进行角色扮演对话。
-情景设定: ${analysisData.roleplay.scenario}
-你扮演: ${analysisData.roleplay.aiRole}
-学生扮演: ${analysisData.roleplay.studentRole}
-请保持回复简短、自然（1-3句话），使用适合初中/中职水平的基础词汇。如果学生的回复中存在明显的英语语法错误，请在你的回复中自然地用正确的表达重复一次，以作示范。`;
-
-      const apiHistory = newHistory.map(msg => ({
-        role: msg.role === 'user' ? 'user' : 'assistant',
-        content: msg.content
-      }));
-
       const aiReply = await chatComplete({
-        system: systemPrompt,
-        messages: apiHistory
+        system: buildRoleplaySystemPrompt(),
+        messages: historyToApiMessages(newHistory, null)
       });
-
       if (aiReply) {
         setChatHistory(prev => [...prev, { role: 'ai', content: aiReply }]);
         playTTS(aiReply);
@@ -304,6 +327,109 @@ export default function App() {
     } catch (err) {
       console.error("Chat error", err);
       setChatHistory(prev => [...prev, { role: 'ai', content: `(对话出错: ${err.message || '网络异常'}，请重试)` }]);
+    } finally {
+      setIsAiTyping(false);
+    }
+  };
+
+  // --- 真录音：MediaRecorder 录 webm/opus，直接发给多模态 API ---
+  const blobToBase64 = (blob) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+
+  const pickRecorderMime = () => {
+    if (typeof MediaRecorder === 'undefined') return '';
+    const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+    return candidates.find(m => MediaRecorder.isTypeSupported(m)) || '';
+  };
+
+  const mimeToFormat = (mime) => {
+    const m = (mime || '').toLowerCase();
+    if (m.includes('webm')) return 'webm';
+    if (m.includes('mp4') || m.includes('m4a')) return 'mp4';
+    if (m.includes('ogg')) return 'ogg';
+    if (m.includes('wav')) return 'wav';
+    return 'webm';
+  };
+
+  const stopAudioRecording = () => {
+    if (recordTimerRef.current) {
+      clearInterval(recordTimerRef.current);
+      recordTimerRef.current = null;
+    }
+    const mr = mediaRecorderRef.current;
+    if (mr && mr.state !== 'inactive') {
+      try { mr.stop(); } catch { /* noop */ }
+    }
+  };
+
+  const startAudioRecording = async () => {
+    if (isVoiceRecording) { stopAudioRecording(); return; }
+    if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      alert('当前浏览器不支持录音，请使用最新的 Chrome/Edge/Safari。');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStreamRef.current = stream;
+      const mime = pickRecorderMime();
+      const mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      mediaRecorderRef.current = mr;
+      audioChunksRef.current = [];
+      mr.ondataavailable = (e) => { if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data); };
+      mr.onstop = async () => {
+        const actualMime = mr.mimeType || mime || 'audio/webm';
+        const blob = new Blob(audioChunksRef.current, { type: actualMime });
+        const duration = Math.max(1, Math.round((Date.now() - recordStartRef.current) / 1000));
+        stream.getTracks().forEach(t => t.stop());
+        audioStreamRef.current = null;
+        setIsVoiceRecording(false);
+        if (blob.size > 200) {
+          handleSendVoice(blob, duration, actualMime);
+        }
+      };
+      recordStartRef.current = Date.now();
+      setRecordSec(0);
+      mr.start();
+      setIsVoiceRecording(true);
+      recordTimerRef.current = setInterval(() => {
+        const sec = Math.round((Date.now() - recordStartRef.current) / 1000);
+        setRecordSec(sec);
+        if (sec >= MAX_RECORD_SEC) stopAudioRecording();
+      }, 250);
+    } catch (err) {
+      console.error(err);
+      alert('无法访问麦克风：' + (err?.message || err));
+      setIsVoiceRecording(false);
+    }
+  };
+
+  const handleSendVoice = async (blob, duration, mime) => {
+    const audioUrl = URL.createObjectURL(blob);
+    const newMsg = {
+      role: 'user',
+      content: `[voice ${duration}s]`,
+      audio: { url: audioUrl, duration, mime }
+    };
+    const newHistory = [...chatHistory, newMsg];
+    setChatHistory(newHistory);
+    setIsAiTyping(true);
+    try {
+      const base64 = await blobToBase64(blob);
+      const aiReply = await chatComplete({
+        system: buildRoleplaySystemPrompt(),
+        messages: historyToApiMessages(newHistory, { base64, format: mimeToFormat(mime) })
+      });
+      if (aiReply) {
+        setChatHistory(prev => [...prev, { role: 'ai', content: aiReply }]);
+        playTTS(aiReply);
+      }
+    } catch (err) {
+      console.error('Voice chat error', err);
+      setChatHistory(prev => [...prev, { role: 'ai', content: `(语音处理失败: ${err.message || '网络异常'}，请重试)` }]);
     } finally {
       setIsAiTyping(false);
     }
@@ -670,7 +796,20 @@ export default function App() {
                         <Volume2 className="w-4 h-4" />
                       </button>
                     )}
-                    <p className="leading-relaxed text-base">{msg.content}</p>
+                    {msg.audio ? (
+                      <div className="flex items-center gap-2">
+                        <Mic className="w-4 h-4 shrink-0 opacity-80" />
+                        <audio
+                          controls
+                          src={msg.audio.url}
+                          className="h-8 max-w-[220px] sm:max-w-[280px]"
+                          preload="metadata"
+                        />
+                        <span className="text-xs opacity-80 font-mono tabular-nums">{msg.audio.duration}s</span>
+                      </div>
+                    ) : (
+                      <p className="leading-relaxed text-base">{msg.content}</p>
+                    )}
                   </div>
                 </div>
               ))}
@@ -690,23 +829,38 @@ export default function App() {
             <div className="bg-white p-3 sm:p-4 border-t border-slate-200 shrink-0">
               <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-full border border-slate-200 focus-within:border-indigo-400 focus-within:ring-2 focus-within:ring-indigo-100 transition-all">
                 <button
-                  onClick={() => startSpeechRecognition(null, (text) => setChatInput(text))}
-                  className={`p-3 rounded-full shrink-0 transition-colors ${isRecording ? 'bg-red-500 text-white animate-pulse' : 'bg-white text-indigo-600 hover:bg-slate-50 shadow-sm'}`}
-                  title="语音输入"
+                  onClick={startAudioRecording}
+                  disabled={isAiTyping}
+                  className={`shrink-0 rounded-full transition-all flex items-center gap-2 font-mono ${
+                    isVoiceRecording
+                      ? 'bg-red-500 text-white animate-pulse px-4 py-2.5'
+                      : 'bg-white text-indigo-600 hover:bg-slate-50 shadow-sm p-3'
+                  } ${isAiTyping ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  title={isVoiceRecording ? '点击停止并发送' : '点击开始录音'}
                 >
-                  <Mic className="w-5 h-5" />
+                  {isVoiceRecording ? (
+                    <>
+                      <Square className="w-4 h-4 fill-current" />
+                      <span className="text-sm tabular-nums">
+                        {String(Math.floor(recordSec / 60)).padStart(2, '0')}:{String(recordSec % 60).padStart(2, '0')}
+                      </span>
+                    </>
+                  ) : (
+                    <Mic className="w-5 h-5" />
+                  )}
                 </button>
                 <input
                   type="text"
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && sendChatMessage(chatInput)}
-                  placeholder="可打字，或点击左侧麦克风说话..."
-                  className="flex-1 bg-transparent border-none focus:outline-none px-2 text-slate-700 text-base w-full"
+                  placeholder={isVoiceRecording ? '录音中，再次点击左侧按钮结束并发送' : '可打字，或点击左侧麦克风说话（最长 60s）'}
+                  disabled={isVoiceRecording}
+                  className="flex-1 bg-transparent border-none focus:outline-none px-2 text-slate-700 text-base w-full disabled:text-slate-400"
                 />
                 <button
                   onClick={() => sendChatMessage(chatInput)}
-                  disabled={!chatInput.trim() || isAiTyping}
+                  disabled={!chatInput.trim() || isAiTyping || isVoiceRecording}
                   className="p-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white rounded-full shrink-0 transition-colors shadow-sm"
                 >
                   <Send className="w-5 h-5 -ml-0.5 mt-0.5" />
