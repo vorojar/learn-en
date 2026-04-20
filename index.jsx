@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Pause, Mic, MicOff, CheckCircle2, XCircle, ArrowRight, BookOpen, MessageSquare, Volume2, Send, Loader2, RotateCcw, AlertCircle, KeyRound, Save, ChevronDown, ChevronUp, Square } from 'lucide-react';
+import { Play, Pause, Mic, MicOff, CheckCircle2, XCircle, ArrowRight, BookOpen, MessageSquare, Volume2, Send, Loader2, RotateCcw, AlertCircle, KeyRound, Save, ChevronDown, ChevronUp, Square, X, Sparkles, FileText } from 'lucide-react';
 
 const DEFAULT_API_BASE = 'https://api.kie.ai/gemini-3-flash/v1/chat/completions';
 const DEFAULT_API_MODEL = 'gemini-3-flash';
@@ -161,6 +161,12 @@ export default function App() {
   const [recognitionResult, setRecognitionResult] = useState("");
   const [pronunciationFeedback, setPronunciationFeedback] = useState(null);
   const [activeWordId, setActiveWordId] = useState(null);
+
+  // 学习报告状态
+  const [report, setReport] = useState(null);
+  const [showReport, setShowReport] = useState(false);
+  const [generatingReport, setGeneratingReport] = useState(false);
+  const REPORT_TRIGGER_ROUNDS = 10;
 
   // 语音聊天录音状态
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
@@ -614,6 +620,77 @@ status 含义:
       setChatHistory(prev => [...prev, { role: 'ai', content: `(语音处理失败: ${err.message || '网络异常'}，请重试)` }]);
     } finally {
       setIsAiTyping(false);
+    }
+  };
+
+  // --- 学习报告：基于本次角色扮演对话的综合评估 ---
+  const generateReport = async () => {
+    if (generatingReport) return;
+    setGeneratingReport(true);
+    try {
+      const vocabLines = (analysisData.coreVocab || [])
+        .map(v => {
+          const forms = Array.isArray(v.variants) && v.variants.length
+            ? v.variants.join(', ')
+            : (v.word || v.lemma);
+          return `  - ${v.lemma || v.word}（变形: ${forms}；含义: ${v.translation}）`;
+        })
+        .join('\n');
+
+      const transcript = chatHistory.map(m => {
+        if (m.role === 'ai') return `AI: ${m.content}`;
+        if (m.audio) return `学生（语音 ${m.audio.duration}s）: ${m.content || '[语音内容省略]'}`;
+        if (m._wasAudio) return `学生（语音 ${m._audioDuration}s）: [语音内容省略]`;
+        return `学生: ${m.content}`;
+      }).join('\n');
+
+      const sys = `你是一位资深英语教师，评估一个中职英语学生完成的基于原文的口语角色扮演练习。只返回 JSON，不要 Markdown 围栏。
+
+【原文语料】
+${corpus}
+
+【核心词汇清单】
+${vocabLines || '（无）'}
+
+严格按以下 JSON 格式输出评估报告：
+{
+  "overallGrade": "A | B | C | D （A 最优，D 需加强）",
+  "summary": "整体评价，2-3 句中文",
+  "vocabUsage": [
+    {"word": "原形 lemma", "used": true/false, "example": "学生实际用的完整句子；若未用请填 null"}
+  ],
+  "grammarNotes": ["语法观察要点，中文，2-4 条"],
+  "fluencyNotes": ["表达流畅度/得体性观察，中文，1-3 条"],
+  "strengths": ["学生做得好的 2-3 点，中文"],
+  "improvements": ["可改进的 2-3 点，中文，要具体"],
+  "encouragement": "一句温暖的中文鼓励语"
+}
+
+规则：
+- vocabUsage 必须覆盖【核心词汇清单】里的**每一个 lemma**，used=true 的条件是学生对话中使用过该词的任一变形形态（大小写忽略）。
+- 所有 notes/strengths/improvements 用中文、要结合原文和对话中的具体例子。
+- 不要对学生过度苛责；鼓励为主。`;
+
+      const user = `以下是完整的角色扮演对话记录：
+
+${transcript}
+
+请生成学习报告 JSON。`;
+
+      const raw = await chatComplete({
+        system: sys,
+        messages: [{ role: 'user', content: user }],
+        jsonMode: true
+      });
+      const text = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '');
+      const parsed = JSON.parse(text);
+      setReport(parsed);
+      setShowReport(true);
+    } catch (err) {
+      console.error('Report generation error:', err);
+      alert('报告生成失败：' + (err.message || '网络异常') + '\n请稍后重试。');
+    } finally {
+      setGeneratingReport(false);
     }
   };
 
@@ -1089,14 +1166,149 @@ status 含义:
               </div>
             </div>
 
-            <div className="bg-white px-4 pb-4 pt-1 flex justify-center">
-              <button onClick={() => { setStep(1); setCorpus(""); setAnalysisData(null); setChatHistory([]); setCurrentQuestionIdx(0); setSelectedOption(null); setIsAnswerChecked(false); setScore(0); }} className="text-sm text-slate-400 flex items-center gap-1 hover:text-indigo-600 transition-colors py-2 px-4 rounded-full hover:bg-slate-50">
+            <div className="bg-white px-4 pb-4 pt-1 flex items-center justify-center gap-3 flex-wrap">
+              {(() => {
+                const userMsgCount = chatHistory.filter(m => m.role === 'user').length;
+                const ready = userMsgCount >= REPORT_TRIGGER_ROUNDS;
+                return (
+                  <button
+                    onClick={generateReport}
+                    disabled={!ready || generatingReport}
+                    className={`text-sm flex items-center gap-1.5 py-2 px-4 rounded-full transition-all ${
+                      ready
+                        ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:from-indigo-700 hover:to-purple-700 font-semibold shadow-md hover:shadow-lg'
+                        : 'bg-slate-100 text-slate-500 cursor-not-allowed'
+                    }`}
+                  >
+                    {generatingReport ? (
+                      <><Loader2 className="w-4 h-4 animate-spin" /> 正在生成报告...</>
+                    ) : ready ? (
+                      <><Sparkles className="w-4 h-4" /> 生成学习报告</>
+                    ) : (
+                      <><FileText className="w-4 h-4" /> 再聊 {REPORT_TRIGGER_ROUNDS - userMsgCount} 轮可生成报告</>
+                    )}
+                  </button>
+                );
+              })()}
+              <button onClick={() => { setStep(1); setCorpus(""); setAnalysisData(null); setChatHistory([]); setCurrentQuestionIdx(0); setSelectedOption(null); setIsAnswerChecked(false); setScore(0); setReport(null); setShowReport(false); }} className="text-sm text-slate-400 flex items-center gap-1 hover:text-indigo-600 transition-colors py-2 px-4 rounded-full hover:bg-slate-50">
                 <RotateCcw className="w-4 h-4" /> 结束练习，返回首页
               </button>
             </div>
           </div>
         )}
       </div>
+
+      {/* ================= 学习报告 Modal ================= */}
+      {showReport && report && (
+        <div
+          className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 animate-in fade-in"
+          onClick={() => setShowReport(false)}
+        >
+          <div
+            className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto animate-in zoom-in-95"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6 sm:p-8">
+              <div className="flex items-start justify-between mb-6">
+                <div>
+                  <h2 className="text-2xl font-extrabold bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">学习报告</h2>
+                  <p className="text-slate-500 text-sm mt-1">基于本次角色扮演对话的综合评估</p>
+                </div>
+                <button
+                  onClick={() => setShowReport(false)}
+                  className="text-slate-400 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors"
+                  aria-label="关闭"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+
+              {/* 总评 */}
+              <div className="mb-6 p-5 bg-gradient-to-br from-indigo-50 to-purple-50 rounded-2xl border border-indigo-100">
+                <div className="flex items-center gap-4">
+                  <span className="text-5xl sm:text-6xl font-extrabold bg-gradient-to-br from-indigo-600 to-purple-600 bg-clip-text text-transparent shrink-0">
+                    {report.overallGrade || '—'}
+                  </span>
+                  <p className="text-slate-700 leading-relaxed flex-1">{report.summary}</p>
+                </div>
+              </div>
+
+              {Array.isArray(report.vocabUsage) && report.vocabUsage.length > 0 && (
+                <section className="mb-6">
+                  <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
+                    <BookOpen className="w-5 h-5 text-indigo-600" /> 核心词汇使用情况
+                  </h3>
+                  <div className="space-y-2">
+                    {report.vocabUsage.map((v, i) => (
+                      <div key={i} className={`p-3 rounded-xl border flex items-start gap-3 ${v.used ? 'border-green-200 bg-green-50' : 'border-slate-200 bg-slate-50'}`}>
+                        {v.used
+                          ? <CheckCircle2 className="w-5 h-5 text-green-600 shrink-0 mt-0.5" />
+                          : <XCircle className="w-5 h-5 text-slate-400 shrink-0 mt-0.5" />}
+                        <div className="flex-1 min-w-0">
+                          <span className="font-semibold text-slate-800">{v.word}</span>
+                          {v.used && v.example && <p className="text-sm text-slate-600 italic mt-1 break-words">"{v.example}"</p>}
+                          {!v.used && <p className="text-sm text-slate-500 mt-1">本次对话未使用</p>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {Array.isArray(report.grammarNotes) && report.grammarNotes.length > 0 && (
+                <section className="mb-6">
+                  <h3 className="font-bold text-slate-800 mb-3">📝 语法观察</h3>
+                  <ul className="space-y-1.5 list-disc list-inside text-slate-700 text-sm leading-relaxed">
+                    {report.grammarNotes.map((n, i) => <li key={i}>{n}</li>)}
+                  </ul>
+                </section>
+              )}
+
+              {Array.isArray(report.fluencyNotes) && report.fluencyNotes.length > 0 && (
+                <section className="mb-6">
+                  <h3 className="font-bold text-slate-800 mb-3">💬 流利度与得体性</h3>
+                  <ul className="space-y-1.5 list-disc list-inside text-slate-700 text-sm leading-relaxed">
+                    {report.fluencyNotes.map((n, i) => <li key={i}>{n}</li>)}
+                  </ul>
+                </section>
+              )}
+
+              {Array.isArray(report.strengths) && report.strengths.length > 0 && (
+                <section className="mb-6 p-4 bg-green-50 border border-green-100 rounded-2xl">
+                  <h3 className="font-bold text-green-800 mb-2">✨ 做得好的地方</h3>
+                  <ul className="space-y-1 list-disc list-inside text-green-700 text-sm leading-relaxed">
+                    {report.strengths.map((n, i) => <li key={i}>{n}</li>)}
+                  </ul>
+                </section>
+              )}
+
+              {Array.isArray(report.improvements) && report.improvements.length > 0 && (
+                <section className="mb-6 p-4 bg-orange-50 border border-orange-100 rounded-2xl">
+                  <h3 className="font-bold text-orange-800 mb-2">🎯 可以改进</h3>
+                  <ul className="space-y-1 list-disc list-inside text-orange-700 text-sm leading-relaxed">
+                    {report.improvements.map((n, i) => <li key={i}>{n}</li>)}
+                  </ul>
+                </section>
+              )}
+
+              {report.encouragement && (
+                <div className="p-5 bg-gradient-to-r from-yellow-50 via-pink-50 to-indigo-50 rounded-2xl text-center border border-indigo-100">
+                  <p className="font-medium text-slate-800 leading-relaxed">💪 {report.encouragement}</p>
+                </div>
+              )}
+
+              <div className="mt-6 flex justify-end">
+                <button
+                  onClick={() => setShowReport(false)}
+                  className="px-5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full font-medium text-sm transition-colors"
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
