@@ -89,17 +89,24 @@ export default function App() {
   const [keySaved, setKeySaved] = useState(false);
 
   const saveApiConfig = () => {
-    if (!apiKeyInput.trim()) {
+    const trimmed = apiKeyInput.trim();
+    if (!trimmed) {
       setErrorMsg('API Key 不能为空');
-      return;
+      return false;
     }
-    safeSetLS(LS_KEYS.key, apiKeyInput.trim());
+    safeSetLS(LS_KEYS.key, trimmed);
     safeSetLS(LS_KEYS.base, apiBaseInput.trim() || DEFAULT_API_BASE);
     safeSetLS(LS_KEYS.model, apiModelInput.trim() || DEFAULT_API_MODEL);
+    // 回读校验：Safari 私密模式等情况下 setItem 可能静默失败
+    if (safeGetLS(LS_KEYS.key) !== trimmed) {
+      setErrorMsg('浏览器禁用了本地存储，无法保存 Key（是否在私密/隐身模式？）');
+      return false;
+    }
     setShowKeyPanel(false);
     setErrorMsg('');
     setKeySaved(true);
     setTimeout(() => setKeySaved(false), 2000);
+    return true;
   };
 
   useEffect(() => {
@@ -111,6 +118,10 @@ export default function App() {
 
   // --- API 调用：分析语料生成学习数据 ---
   const handleAnalyze = async () => {
+    // 用户体验兜底：填了输入框但没点"保存"，自动替他保存
+    if (apiKeyInput.trim() && !getApiConfig().apiKey) {
+      if (!saveApiConfig()) return;
+    }
     if (!getApiConfig().apiKey) {
       setErrorMsg("请先在上方配置 API Key 并保存。");
       setShowKeyPanel(true);
