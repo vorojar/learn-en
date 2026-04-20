@@ -281,7 +281,7 @@ export default function App() {
     const userPrompt = `请分析以下英语语料，并生成教学内容。
 语料内容: "${corpus}"
 
-请提取核心词汇（4-6个原形，不得重复），生成 3 道单项选择题用于强化理解，并设定一个用于最后口语实战的角色扮演情景。
+请提取核心词汇（4-6个原形，不得重复），生成 10 道单项选择题用于强化理解，并设定一个用于最后口语实战的角色扮演情景。
 
 只返回一个纯 JSON 对象（不要 Markdown 代码围栏、不要任何解释性文字），结构如下：
 {
@@ -302,7 +302,7 @@ export default function App() {
 严格要求：
 1. coreVocab 的 lemma 字段必须是**词典原形**（动词用不定式原形、名词用单数原形），绝不能把同一个词的不同变形列成多个条目。例如语料里同时出现 "go / goes / went / going"，只能作为 lemma="go" 一个条目。
 2. coreVocab 的 variants 是一个字符串数组，列出该 lemma 在语料文本里**实际出现**的所有字面形态（必须能 Ctrl+F 在语料中搜到，大小写一致）。若原形本身就在语料里，也要包含进去。数组至少一项，不能为空。
-3. coreVocab 总共 4-6 个 lemma 条目；exercises 恰好 3 条，每题 4 个选项，answerIndex 为 0-3 的整数。`;
+3. coreVocab 总共 4-6 个 lemma 条目；exercises 恰好 10 条，每题 4 个选项，answerIndex 为 0-3 的整数，题目覆盖词汇用法、语法、语义理解等不同维度，难度由易到难。`;
 
     try {
       let textResult = await chatComplete({
@@ -651,7 +651,7 @@ status 含义:
       {/* 品牌大标题 */}
       <div className="w-full max-w-3xl text-center mb-6 sm:mb-8 mt-2">
         <h1 className="text-3xl sm:text-5xl font-extrabold tracking-tight bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-500 bg-clip-text text-transparent">
-          群文语料口语交互官
+          群文语料智练官
         </h1>
       </div>
 
