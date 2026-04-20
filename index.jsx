@@ -393,11 +393,37 @@ export default function App() {
   };
 
   // --- API 调用：情景对话 (Roleplay) ---
-  const buildRoleplaySystemPrompt = () => `你正在和一个中职英语学生进行角色扮演对话。
-情景设定: ${analysisData.roleplay.scenario}
+  const buildRoleplaySystemPrompt = () => {
+    const vocabLines = (analysisData.coreVocab || [])
+      .map(v => {
+        const forms = Array.isArray(v.variants) && v.variants.length
+          ? v.variants.join(', ')
+          : (v.word || v.lemma);
+        return `  - ${v.lemma || v.word}（语料中形态: ${forms}；含义: ${v.translation}）`;
+      })
+      .join('\n');
+
+    return `你正在和一个中职英语学生进行**基于原文语料**的角色扮演对话练习。核心目标是让学生在对话中**真正用上**语料里的核心词汇、句式和场景事实。
+
+===== 原文语料（对话必须紧扣） =====
+${corpus}
+
+===== 核心词汇（主动引导学生使用） =====
+${vocabLines || '（无）'}
+
+===== 角色与情景 =====
+情景: ${analysisData.roleplay.scenario}
 你扮演: ${analysisData.roleplay.aiRole}
 学生扮演: ${analysisData.roleplay.studentRole}
-请保持回复简短、自然（1-3句话），使用适合初中/中职水平的基础词汇。如果学生的回复中存在明显的英语语法/发音错误，请在你的回复中自然地用正确的表达重复一次，以作示范。`;
+
+===== 严格的对话规则 =====
+1. **对话紧扣语料事实**：延续语料中已经描述过的事件、人物、时间、地点；不要跳到与原文无关的新话题。
+2. **主动创造使用机会**：通过提问、请求、给选项的方式，诱导学生在回答中自然用出核心词汇（能用其变形更好，例如原文是 "checked in" 就让学生也说 "I checked in last night"）。
+3. **覆盖语料的多个情节**：每 2-3 轮就把话题从一个情节推进到下一个（入住 → 早餐 → 游泳 → 乘电梯 → 退房等），让学生把整段语料涉及的环节都练到，不要在一个点上反复绕。
+4. **自然示范纠错**：学生如果用错语法/时态/发音（尤其核心词汇的变形），你在自己下一句里用**正确表达**把那个意思再说一遍，不要直接指出错误、不要用中文。
+5. **回复简短**：1-3 句话，用适合初中/中职水平的基础词汇；尽量每轮自己也用 1-2 个语料里出现过的词。
+6. **全部用英文**回复，不要出现中文。`;
+  };
 
   // 把 chatHistory 转成 API 消息；历史里的 audio 降级为文本占位（节省 token 与重复编码）
   const historyToApiMessages = (history, audioPayload) => history.map((msg, idx) => {
