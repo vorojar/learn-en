@@ -281,13 +281,13 @@ export default function App() {
     const userPrompt = `请分析以下英语语料，并生成教学内容。
 语料内容: "${corpus}"
 
-请提取核心词汇（4-6个），生成 3 道单项选择题用于强化理解，并设定一个用于最后口语实战的角色扮演情景。
+请提取核心词汇（4-6个原形，不得重复），生成 3 道单项选择题用于强化理解，并设定一个用于最后口语实战的角色扮演情景。
 
 只返回一个纯 JSON 对象（不要 Markdown 代码围栏、不要任何解释性文字），结构如下：
 {
   "theme": "语料的核心主题（中文）",
   "coreVocab": [
-    { "word": "【必须是语料中原文出现的字面形态，大小写和词形一致；若语料里是 swimming 就写 swimming，不要写原形 swim】", "lemma": "该词的词典原形，例如 swim / take care of；若与 word 相同也要填写", "phonetic": "音标（不含 // 斜杠，基于 lemma）", "translation": "中文释义", "explanation": "简短的用法说明或例句" }
+    { "lemma": "【词典原形，例如 swim / take / child / take care of；动词用不定式原形，名词用单数原形】", "variants": ["【该原形在语料里实际出现的所有字面形态，必须能在语料中 Ctrl+F 搜到；例如原形 swim 在语料里以 swimming 出现，就写 [\"swimming\"]；若同时出现 swim 和 swimming，就写 [\"swim\",\"swimming\"]；大小写与原文完全一致】"], "phonetic": "音标（不含 // 斜杠，基于 lemma 原形）", "translation": "中文释义", "explanation": "简短的用法说明或例句" }
   ],
   "exercises": [
     { "question": "英文题目", "options": ["A选项","B选项","C选项","D选项"], "answerIndex": 0, "explanation": "中文解析" }
@@ -300,9 +300,9 @@ export default function App() {
   }
 }
 严格要求：
-1. coreVocab 的 word 字段必须是语料文本里**逐字出现**的片段（可用 Ctrl+F 在语料里搜到），用于在原文中高亮定位；不得改写成原形、复数/单数互换、时态变换。
-2. coreVocab 的 lemma 字段才是词典原形（给学生记忆用）；若语料里就是原形，lemma 与 word 相同即可。
-3. coreVocab 4-6 条；exercises 恰好 3 条，每题 4 个选项，answerIndex 为 0-3 的整数。`;
+1. coreVocab 的 lemma 字段必须是**词典原形**（动词用不定式原形、名词用单数原形），绝不能把同一个词的不同变形列成多个条目。例如语料里同时出现 "go / goes / went / going"，只能作为 lemma="go" 一个条目。
+2. coreVocab 的 variants 是一个字符串数组，列出该 lemma 在语料文本里**实际出现**的所有字面形态（必须能 Ctrl+F 在语料中搜到，大小写一致）。若原形本身就在语料里，也要包含进去。数组至少一项，不能为空。
+3. coreVocab 总共 4-6 个 lemma 条目；exercises 恰好 3 条，每题 4 个选项，answerIndex 为 0-3 的整数。`;
 
     try {
       let textResult = await chatComplete({
@@ -591,28 +591,32 @@ status 含义:
   };
 
 
-  // --- 高亮渲染逻辑 ---
+  // --- 高亮渲染逻辑（遍历每个 lemma 的所有 variants 进行高亮） ---
   const renderHighlightedCorpus = () => {
     if (!analysisData) return corpus;
 
     let htmlText = corpus;
-
-    // 1. 转义正则表达式的特殊字符
     const escapeRegExp = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-    // 2. 将词汇按长度降序排列
-    const sortedVocab = [...analysisData.coreVocab].sort((a, b) => b.word.length - a.word.length);
-
-    // 3. 第一轮替换：用独立的占位符替换目标词汇。
-    sortedVocab.forEach((item, index) => {
-      const escapedWord = escapeRegExp(item.word);
-      const regex = new RegExp(`\\b(${escapedWord})\\b`, 'gi');
-      htmlText = htmlText.replace(regex, `__HIGHLIGHT_${index}__$1__ENDHIGHLIGHT__`);
+    // 把所有 variants 展平成一个扁平列表（兼容旧数据：若没有 variants，回落到 word 或 lemma）
+    const allVariants = [];
+    analysisData.coreVocab.forEach((item) => {
+      const forms = Array.isArray(item.variants) && item.variants.length > 0
+        ? item.variants
+        : [item.word || item.lemma].filter(Boolean);
+      forms.forEach(v => { if (v) allVariants.push(v); });
     });
+    // 按长度降序匹配（避免 "take" 吃掉 "take care of" 的前缀）
+    allVariants.sort((a, b) => b.length - a.length);
 
-    // 4. 第二轮替换：将占位符替换为真实的 HTML 标签。
-    sortedVocab.forEach((_, index) => {
-      const tokenRegex = new RegExp(`__HIGHLIGHT_${index}__(.*?)__ENDHIGHLIGHT__`, 'g');
+    // 两轮替换：先占位符，再 HTML 标签（防止 HTML 里的属性被二次匹配）
+    allVariants.forEach((variant, i) => {
+      const escaped = escapeRegExp(variant);
+      const regex = new RegExp(`\\b(${escaped})\\b`, 'gi');
+      htmlText = htmlText.replace(regex, `__HIGHLIGHT_${i}__$1__ENDHIGHLIGHT__`);
+    });
+    allVariants.forEach((_, i) => {
+      const tokenRegex = new RegExp(`__HIGHLIGHT_${i}__(.*?)__ENDHIGHLIGHT__`, 'g');
       htmlText = htmlText.replace(tokenRegex, `<mark class="bg-yellow-200 text-yellow-900 px-1.5 mx-0.5 rounded-md font-semibold border-b-2 border-yellow-500 shadow-sm">$1</mark>`);
     });
 
@@ -644,6 +648,13 @@ status 含义:
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-800 flex flex-col items-center p-4 sm:p-8">
+      {/* 品牌大标题 */}
+      <div className="w-full max-w-3xl text-center mb-6 sm:mb-8 mt-2">
+        <h1 className="text-3xl sm:text-5xl font-extrabold tracking-tight bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-500 bg-clip-text text-transparent">
+          群文语料口语交互官
+        </h1>
+      </div>
+
       {/* 头部进度指示 */}
       <div className="w-full max-w-3xl flex items-center justify-between mb-8 px-4">
         {[
@@ -782,12 +793,16 @@ status 含义:
                   <div className="flex justify-between items-start sm:items-center flex-col sm:flex-row gap-4">
                     <div className="flex-1">
                       <div className="flex flex-wrap items-end gap-2 sm:gap-3 mb-1">
-                        <span className="text-xl font-bold text-indigo-900">{item.word}</span>
-                        {item.lemma && item.lemma.toLowerCase() !== item.word.toLowerCase() && (
-                          <span className="text-xs text-indigo-500 bg-indigo-50 px-2 py-0.5 rounded-full">
-                            原形：{item.lemma}
-                          </span>
-                        )}
+                        <span className="text-xl font-bold text-indigo-900">{item.lemma || item.word}</span>
+                        {(() => {
+                          const lemma = (item.lemma || item.word || '').toLowerCase();
+                          const forms = (item.variants || []).filter(v => v && v.toLowerCase() !== lemma);
+                          return forms.length > 0 && (
+                            <span className="text-xs text-indigo-500 bg-indigo-50 px-2 py-0.5 rounded-full">
+                              原文：{forms.join(', ')}
+                            </span>
+                          );
+                        })()}
                         <span className="text-slate-500 font-mono text-sm">/{item.phonetic}/</span>
                       </div>
                       <div className="text-slate-700 font-medium mb-1.5">{item.translation}</div>
@@ -796,7 +811,7 @@ status 含义:
 
                     <div className="flex items-center gap-3 self-end sm:self-auto shrink-0">
                       <button
-                        onClick={() => playTTS(item.word)}
+                        onClick={() => playTTS(item.lemma || item.word)}
                         className="p-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full transition-colors"
                         title="标准示范"
                       >
