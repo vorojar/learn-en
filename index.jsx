@@ -461,7 +461,8 @@ export default function App() {
     }
   };
 
-  const startAudioRecording = async () => {
+  // 通用录音函数：录完把 blob 交给 onResult 回调处理（Step 2 发音评测 / Step 4 对话都复用）
+  const startAudioRecording = async (onResult, maxSec = 60) => {
     if (isVoiceRecording) { stopAudioRecording(); return; }
     if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
       alert('当前浏览器不支持录音，请使用最新的 Chrome/Edge/Safari。');
@@ -483,7 +484,7 @@ export default function App() {
         audioStreamRef.current = null;
         setIsVoiceRecording(false);
         if (blob.size > 200) {
-          handleSendVoice(blob, duration, actualMime);
+          onResult(blob, duration, actualMime);
         }
       };
       recordStartRef.current = Date.now();
@@ -493,12 +494,55 @@ export default function App() {
       recordTimerRef.current = setInterval(() => {
         const sec = Math.round((Date.now() - recordStartRef.current) / 1000);
         setRecordSec(sec);
-        if (sec >= MAX_RECORD_SEC) stopAudioRecording();
+        if (sec >= maxSec) stopAudioRecording();
       }, 250);
     } catch (err) {
       console.error(err);
       alert('无法访问麦克风：' + (err?.message || err));
       setIsVoiceRecording(false);
+    }
+  };
+
+  // Step 2 发音评测：录完发给 AI，让它判断发音好坏
+  const evaluatePronunciation = async (blob, mime, item, idx) => {
+    const target = item.lemma || item.word;
+    setActiveWordId(idx);
+    setPronunciationFeedback({ status: 'pending', msg: '正在评测发音...' });
+    try {
+      const base64 = await blobToBase64(blob);
+      const raw = await chatComplete({
+        system: '你是一位英语发音教练。严格只返回 JSON，不要 Markdown 围栏、不要任何解释性文字。',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: `评估这段录音是否在清晰地念出目标单词/短语。
+目标: "${target}"（语料中的形态: "${item.word}"）
+
+严格按以下 JSON 格式回复:
+{"status": "excellent|ok|needs_work|not_heard", "heard": "你实际听到的英文（若听不清写 ?）", "tip": "中文简短反馈，不超过 20 字"}
+
+status 含义:
+- excellent: 发音清晰基本标准
+- ok: 基本正确，只有小瑕疵
+- needs_work: 发音和目标差距较大
+- not_heard: 录音里几乎没有人声或听不出英文` },
+            { type: 'input_audio', input_audio: { data: base64, format: mimeToFormat(mime) } }
+          ]
+        }],
+        jsonMode: true
+      });
+      const text = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '');
+      const r = JSON.parse(text);
+      const statusMap = {
+        excellent: { status: 'excellent', msg: `发音非常棒！（${r.heard || target}）` },
+        ok: { status: 'ok', msg: `基本正确 · ${r.tip || '继续保持'}（识别为：${r.heard || target}）` },
+        needs_work: { status: 'needs_work', msg: `${r.tip || '再试一次'}（识别为：${r.heard || '？'}）` },
+        not_heard: { status: 'error', msg: '录音里没听到清晰的英文，请靠近麦克风再说一遍' }
+      };
+      setPronunciationFeedback(statusMap[r.status] || statusMap.needs_work);
+    } catch (err) {
+      console.error('Pronunciation evaluation error:', err);
+      setPronunciationFeedback({ status: 'error', msg: `评测失败：${err.message || '网络异常'}，请重试` });
     }
   };
 
@@ -746,24 +790,51 @@ export default function App() {
                         onClick={() => {
                           setActiveWordId(idx);
                           setPronunciationFeedback(null);
-                          startSpeechRecognition(item.word);
+                          startAudioRecording(
+                            (blob, _dur, mime) => evaluatePronunciation(blob, mime, item, idx),
+                            8
+                          );
                         }}
-                        className={`p-3 rounded-full transition-all text-white shadow-md flex items-center gap-2 ${isRecording && activeWordId === idx ? 'bg-red-500 animate-pulse px-4' : 'bg-indigo-600 hover:bg-indigo-700'}`}
-                        title="点击跟读"
+                        disabled={pronunciationFeedback?.status === 'pending' && activeWordId === idx}
+                        className={`rounded-full transition-all text-white shadow-md flex items-center gap-2 font-mono ${
+                          isVoiceRecording && activeWordId === idx
+                            ? 'bg-red-500 animate-pulse px-4 py-3'
+                            : 'bg-indigo-600 hover:bg-indigo-700 p-3'
+                        } disabled:opacity-60 disabled:cursor-not-allowed`}
+                        title={isVoiceRecording && activeWordId === idx ? '点击停止' : '点击录音跟读（最长 8s）'}
                       >
-                        <Mic className="w-5 h-5" />
-                        {isRecording && activeWordId === idx && <span className="text-sm font-medium">聆听中...</span>}
+                        {isVoiceRecording && activeWordId === idx ? (
+                          <>
+                            <Square className="w-4 h-4 fill-current" />
+                            <span className="text-sm tabular-nums">{String(recordSec).padStart(2, '0')}s</span>
+                          </>
+                        ) : (
+                          <Mic className="w-5 h-5" />
+                        )}
                       </button>
                     </div>
                   </div>
 
                   {/* 发音反馈展示 */}
-                  {activeWordId === idx && pronunciationFeedback && (
-                    <div className={`mt-4 p-3 rounded-xl text-sm flex items-center gap-2 animate-in slide-in-from-top-2 ${pronunciationFeedback.status === 'excellent' ? 'bg-green-100 text-green-800' : pronunciationFeedback.status === 'error' ? 'bg-red-100 text-red-800' : 'bg-orange-100 text-orange-800'}`}>
-                      {pronunciationFeedback.status === 'excellent' ? <CheckCircle2 className="w-5 h-5 shrink-0" /> : <XCircle className="w-5 h-5 shrink-0" />}
-                      <span className="font-medium">{pronunciationFeedback.msg}</span>
-                    </div>
-                  )}
+                  {activeWordId === idx && pronunciationFeedback && (() => {
+                    const s = pronunciationFeedback.status;
+                    const colorClass = s === 'excellent' ? 'bg-green-100 text-green-800'
+                      : s === 'ok' ? 'bg-emerald-100 text-emerald-800'
+                      : s === 'pending' ? 'bg-slate-100 text-slate-600'
+                      : s === 'error' ? 'bg-red-100 text-red-800'
+                      : 'bg-orange-100 text-orange-800';
+                    const IconEl = s === 'excellent' || s === 'ok'
+                      ? <CheckCircle2 className="w-5 h-5 shrink-0" />
+                      : s === 'pending'
+                        ? <Loader2 className="w-5 h-5 shrink-0 animate-spin" />
+                        : <XCircle className="w-5 h-5 shrink-0" />;
+                    return (
+                      <div className={`mt-4 p-3 rounded-xl text-sm flex items-center gap-2 animate-in slide-in-from-top-2 ${colorClass}`}>
+                        {IconEl}
+                        <span className="font-medium">{pronunciationFeedback.msg}</span>
+                      </div>
+                    );
+                  })()}
                 </div>
               ))}
             </div>
@@ -915,7 +986,7 @@ export default function App() {
             <div className="bg-white p-3 sm:p-4 border-t border-slate-200 shrink-0">
               <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-full border border-slate-200 focus-within:border-indigo-400 focus-within:ring-2 focus-within:ring-indigo-100 transition-all">
                 <button
-                  onClick={startAudioRecording}
+                  onClick={() => startAudioRecording((blob, dur, mime) => handleSendVoice(blob, dur, mime), MAX_RECORD_SEC)}
                   disabled={isAiTyping}
                   className={`shrink-0 rounded-full transition-all flex items-center gap-2 font-mono ${
                     isVoiceRecording
